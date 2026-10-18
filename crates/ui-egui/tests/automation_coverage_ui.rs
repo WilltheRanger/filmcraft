@@ -139,6 +139,27 @@ fn named_rows_are_clickable() {
     assert_eq!(d.harness.state().session.history.undo.len(), 0, "clicking Open undoes every step");
 }
 
+/// A History list longer than its panel offers only the rows in view, each where it shows: a
+/// click on any offered id lands on that row.
+#[test]
+fn only_visible_history_rows_are_offered() {
+    let mut d = Driver::demo();
+    for n in 0..40 {
+        d.ok("engine.execute", json!({"command": "sequence.addEdit", "params": {"seconds": 0.5 + f64::from(n) * 0.1}}));
+    }
+    d.ok("ui.panel.show", json!({"panel": "History"}));
+    d.frames(4);
+    let panel = d.ok("ui.elements", json!({"prefix": "panel.History"})).as_array().cloned().unwrap_or_default();
+    let p = panel.iter().find(|e| e["id"] == "panel.History").expect("the History panel is shown")["rect"].clone();
+    let (px, py, pw, ph) = (p[0].as_f64().unwrap(), p[1].as_f64().unwrap(), p[2].as_f64().unwrap(), p[3].as_f64().unwrap());
+    let rows = d.ok("ui.elements", json!({"prefix": "history."})).as_array().cloned().unwrap_or_default();
+    assert!(!rows.is_empty() && rows.len() < 41, "only some of the 41 rows fit: {}", rows.len());
+    for r in rows {
+        let (x, y, w, h) = (r["rect"][0].as_f64().unwrap(), r["rect"][1].as_f64().unwrap(), r["rect"][2].as_f64().unwrap(), r["rect"][3].as_f64().unwrap());
+        assert!(x >= px - 1.0 && y >= py - 1.0 && x + w <= px + pw + 1.0 && y + h <= py + ph + 1.0, "{} lies outside the panel: {r}", r["id"]);
+    }
+}
+
 /// A dialog's controls all have ids; the standard ones are named after their labels, scoped to the
 /// dialog (its title bar, which only moves it, counts as background).
 #[test]

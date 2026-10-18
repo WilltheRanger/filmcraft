@@ -16,7 +16,8 @@ pub fn history(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         // automation ids: `history.open`, `history.step.<n>` (1 = the oldest edit) and `history.redo.<n>`
         let mut row = |ui: &mut egui::Ui, id: String, label: &str, current: bool, dim: bool| -> bool {
             let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::click());
-            app.auto.add_response(&id, &resp, label);
+            // the list scrolls: rows out of view are not offered, a partly shown one only where it shows
+            app.auto.add_visible(&id, &resp, label);
             if current {
                 ui.painter().rect_filled(r, 0.0, t.row_selected);
             } else if resp.hovered() {

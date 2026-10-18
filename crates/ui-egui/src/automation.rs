@@ -53,6 +53,18 @@ impl Registry {
             element.response_id = Some(response.id);
         }
     }
+    /// [`Registry::add_response`] for a widget in a scrolling list: only the part a pointer can
+    /// reach is registered (a click goes there), and nothing when it is scrolled out of view.
+    pub fn add_visible(&mut self, id: &str, response: &egui::Response, label: &str) {
+        let reach = response.interact_rect;
+        if reach.width() <= 0.0 || reach.height() <= 0.0 {
+            return;
+        }
+        self.add_response(id, response, label);
+        if let Some(element) = self.elements.last_mut() {
+            element.rect = [reach.min.x, reach.min.y, reach.width(), reach.height()];
+        }
+    }
     pub fn begin_frame(&mut self) {
         self.previous = std::mem::take(&mut self.elements);
     }
@@ -145,7 +157,7 @@ fn label_beside(texts: &[(Rect, String)], r: Rect) -> Option<String> {
 
 impl Registry {
     /// At the end of a frame, give each control drawn this frame that registered no element of its
-    /// own one named from the accessibility tree: `auto.<scope>.<role>[.<label>][.<n>]`, where the
+    /// own one named from the accessibility tree: `auto.<scope>.<role>[.<label>][.<widget>]`, where the
     /// scope is the dialog, the panel (`effectControls`) or `popup`, and the label is the
     /// control's text or the text beside it. Then record coverage for `ui.coverage`. Needs AccessKit
     /// (the control channel turns it on): without it nothing is named, and every control with no
@@ -266,14 +278,8 @@ impl Registry {
                 l if l.is_empty() => format!("auto.{scope}.{role_slug}"),
                 l => format!("auto.{scope}.{role_slug}.{l}"),
             };
-            let mut id = base.clone();
-            let mut n = 1;
-            while !taken.insert(id.clone()) {
-                n += 1;
-                id = format!("{base}.{n}");
-            }
             added.push(Element {
-                id,
+                id: base,
                 label,
                 rect: [w.reach.min.x, w.reach.min.y, w.reach.width(), w.reach.height()],
                 widget_id: Some(format!("{:016x}", w.id.value())),
@@ -283,6 +289,25 @@ impl Registry {
             });
             out.covered += 1;
             out.auto += 1;
+        }
+        // A name several controls share (or a panel already uses) gets each control's own widget
+        // id as a suffix, not its position: an id never moves to another control when one before
+        // it goes away.
+        let mut uses: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for e in &added {
+            *uses.entry(e.id.clone()).or_default() += 1;
+        }
+        for e in &mut added {
+            if uses.get(&e.id).copied().unwrap_or(0) > 1 || taken.contains(&e.id) {
+                let widget = e.response_id.map_or(0, |id| id.value() & 0xffff_ffff);
+                e.id = format!("{}.{widget:08x}", e.id);
+            }
+            let base = e.id.clone();
+            let mut n = 1;
+            while !taken.insert(e.id.clone()) {
+                n += 1;
+                e.id = format!("{base}.{n}");
+            }
         }
         self.elements.extend(added);
         self.coverage = out;

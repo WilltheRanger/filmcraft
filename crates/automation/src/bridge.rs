@@ -141,16 +141,20 @@ impl BridgeClient {
         let deadline = tokio::time::Instant::now() + LAUNCH_WAIT;
         loop {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            match self.try_connect().await {
+            let e = match self.try_connect().await {
                 Ok(c) => return Ok(c),
-                Err(e) if tokio::time::Instant::now() >= deadline => {
-                    return Err(AutomationError::Bridge(format!(
-                        "started {} but its control server did not answer within {}s: {e}",
-                        app.display(),
-                        LAUNCH_WAIT.as_secs()
-                    )));
-                }
-                Err(_) => {}
+                Err(e) => e,
+            };
+            // the app quit before opening its control server: say so now, not after the wait
+            if let Some(status) = self.started_exit() {
+                return Err(AutomationError::Bridge(format!("started {} but it exited ({status}) before its control server answered", app.display())));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(AutomationError::Bridge(format!(
+                    "started {} but its control server did not answer within {}s: {e}",
+                    app.display(),
+                    LAUNCH_WAIT.as_secs()
+                )));
             }
         }
     }
@@ -164,8 +168,23 @@ impl BridgeClient {
         Ok((BufReader::new(r), w))
     }
 
+    /// How the app this client started ended, once it has.
+    fn started_exit(&self) -> Option<std::process::ExitStatus> {
+        let mut started = self.started.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        started.as_mut().and_then(|child| child.try_wait().ok().flatten())
+    }
+
     /// Start `app --control <port>`, unless the one started before is still starting.
     fn start_app(&self, app: &std::path::Path) -> Result<(), AutomationError> {
+        // the app's control server listens on 127.0.0.1 only: an IPv6 bridge address could never
+        // reach the app started here
+        let host = self.addr.rsplit_once(':').map_or("", |(h, _)| h);
+        if !matches!(host, "127.0.0.1" | "localhost") {
+            return Err(AutomationError::BadRequest(format!(
+                "--launch-app starts the app on 127.0.0.1, which `{}` does not reach: use --bridge 127.0.0.1:PORT",
+                self.addr
+            )));
+        }
         let mut started = self.started.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(child) = started.as_mut()
             && matches!(child.try_wait(), Ok(None))
@@ -361,6 +380,29 @@ mod tests {
         let b = BridgeClient::new(free).unwrap().launching("/no/such/filmcraft");
         let e = b.execute("sequence.inspect", json!({})).await.unwrap_err().to_string();
         assert!(e.contains("cannot start") && e.contains("filmcraft"), "{e}");
+    }
+
+    /// An app that starts but quits before opening its control server is reported at once, with
+    /// how it ended, instead of after the whole launch wait. (This test binary stands in for it:
+    /// it rejects `--control` and exits.)
+    #[tokio::test]
+    async fn an_app_that_exits_while_starting_is_reported_at_once() {
+        let free = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().to_string();
+        let b = BridgeClient::new(free).unwrap().launching(std::env::current_exe().unwrap());
+        let t = std::time::Instant::now();
+        let e = b.execute("sequence.inspect", json!({})).await.unwrap_err().to_string();
+        assert!(e.contains("exited"), "{e}");
+        assert!(t.elapsed() < Duration::from_secs(30), "reported after {:?}", t.elapsed());
+    }
+
+    /// The launched app listens on 127.0.0.1 only, so an IPv6 bridge address is refused before
+    /// anything is started.
+    #[tokio::test]
+    async fn launching_needs_an_ipv4_loopback_address() {
+        let b = BridgeClient::new("[::1]:9").unwrap().launching(std::env::current_exe().unwrap());
+        let e = b.execute("sequence.inspect", json!({})).await.unwrap_err().to_string();
+        assert!(e.contains("127.0.0.1"), "{e}");
+        assert!(b.started.lock().unwrap().is_none(), "nothing was started");
     }
 
     /// Everything else is forwarded unchanged.
