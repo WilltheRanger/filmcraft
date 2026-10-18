@@ -15,6 +15,9 @@ use crate::AutomationError;
 const JOB_POLL: Duration = Duration::from_millis(250);
 /// Idle connections kept for reuse; the app serves at most 16 at once.
 const MAX_IDLE: usize = 4;
+/// How long an app started by [`BridgeClient::launching`] has to open its control server (a cold
+/// start loads fonts, the last project and its media).
+const LAUNCH_WAIT: Duration = Duration::from_secs(90);
 
 type Conn = (BufReader<tokio::net::tcp::OwnedReadHalf>, tokio::net::tcp::OwnedWriteHalf);
 
@@ -25,6 +28,10 @@ pub struct BridgeClient {
     /// never holds up the others or leaves its late reply for the next one to read (#1538).
     idle: Mutex<Vec<Conn>>,
     next_id: AtomicU64,
+    /// The app to start when nothing listens at `addr` (`mcp --bridge … --launch-app`).
+    launch: Option<std::path::PathBuf>,
+    /// The app this client started last, so a slow start is waited for rather than started twice.
+    started: std::sync::Mutex<Option<std::process::Child>>,
 }
 
 impl BridgeClient {
@@ -35,7 +42,15 @@ impl BridgeClient {
         if !matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1") {
             return Err(AutomationError::BadRequest(format!("bridge address must be loopback, got `{addr}`")));
         }
-        Ok(Self { addr, idle: Mutex::new(Vec::new()), next_id: AtomicU64::new(1) })
+        Ok(Self { addr, idle: Mutex::new(Vec::new()), next_id: AtomicU64::new(1), launch: None, started: std::sync::Mutex::new(None) })
+    }
+
+    /// Start `app --control <port>` whenever nothing listens at the bridge address (the app is not
+    /// running, or was closed), then wait for its control server, so an agent never needs someone
+    /// to open the app first. The app keeps running after the client is gone.
+    pub fn launching(mut self, app: impl Into<std::path::PathBuf>) -> Self {
+        self.launch = Some(app.into());
+        self
     }
 
     /// Run engine command `id` in the app. A blocking export (`file.exportMedia` with
@@ -117,12 +132,71 @@ impl BridgeClient {
     }
 
     async fn connect(&self) -> Result<Conn, AutomationError> {
+        let refused = match self.try_connect().await {
+            Ok(c) => return Ok(c),
+            Err(e) => e,
+        };
+        let Some(app) = self.launch.as_deref() else { return Err(refused) };
+        self.start_app(app)?;
+        let deadline = tokio::time::Instant::now() + LAUNCH_WAIT;
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            match self.try_connect().await {
+                Ok(c) => return Ok(c),
+                Err(e) if tokio::time::Instant::now() >= deadline => {
+                    return Err(AutomationError::Bridge(format!(
+                        "started {} but its control server did not answer within {}s: {e}",
+                        app.display(),
+                        LAUNCH_WAIT.as_secs()
+                    )));
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    async fn try_connect(&self) -> Result<Conn, AutomationError> {
         let s = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&self.addr))
             .await
             .map_err(|_| AutomationError::Bridge(format!("timed out connecting to {}", self.addr)))?
             .map_err(|e| AutomationError::Bridge(format!("cannot connect to {} ({e}); start the app with `filmcraft --control <port>`", self.addr)))?;
         let (r, w) = s.into_split();
         Ok((BufReader::new(r), w))
+    }
+
+    /// Start `app --control <port>`, unless the one started before is still starting.
+    fn start_app(&self, app: &std::path::Path) -> Result<(), AutomationError> {
+        let mut started = self.started.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(child) = started.as_mut()
+            && matches!(child.try_wait(), Ok(None))
+        {
+            return Ok(());
+        }
+        let port = self
+            .addr
+            .rsplit_once(':')
+            .map(|(_, p)| p)
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| AutomationError::BadRequest(format!("no port in `{}`", self.addr)))?;
+        let spawn = |detach_from_job: bool| {
+            let mut cmd = std::process::Command::new(app);
+            cmd.args(["--control", port]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt as _;
+                // no console of its own, and out of the agent host's job object when it allows
+                // that, so closing the agent session does not close the editor
+                const DETACHED_PROCESS: u32 = 0x0000_0008;
+                const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+                cmd.creation_flags(DETACHED_PROCESS | if detach_from_job { CREATE_BREAKAWAY_FROM_JOB } else { 0 });
+            }
+            #[cfg(not(windows))]
+            let _ = detach_from_job;
+            cmd.spawn()
+        };
+        let child = spawn(true).or_else(|_| spawn(false)).map_err(|e| AutomationError::Bridge(format!("cannot start {}: {e}", app.display())))?;
+        *started = Some(child);
+        Ok(())
     }
 }
 
@@ -269,6 +343,24 @@ mod tests {
         slow.abort();
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(b.execute("fast", json!({})).await.unwrap(), json!("fast"));
+    }
+
+    /// With an app to launch, a running app is used as it is: nothing is started.
+    #[tokio::test]
+    async fn a_running_app_is_not_launched_again() {
+        let (addr, _) = fake_app(Value::Null).await;
+        let b = BridgeClient::new(addr).unwrap().launching("/no/such/filmcraft");
+        assert_eq!(b.execute("sequence.inspect", json!({})).await.unwrap(), Value::Null);
+        assert!(b.started.lock().unwrap().is_none());
+    }
+
+    /// When nothing listens and the app cannot be started, the error says which app and why.
+    #[tokio::test]
+    async fn an_app_that_cannot_start_is_a_clear_error() {
+        let free = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().to_string();
+        let b = BridgeClient::new(free).unwrap().launching("/no/such/filmcraft");
+        let e = b.execute("sequence.inspect", json!({})).await.unwrap_err().to_string();
+        assert!(e.contains("cannot start") && e.contains("filmcraft"), "{e}");
     }
 
     /// Everything else is forwarded unchanged.

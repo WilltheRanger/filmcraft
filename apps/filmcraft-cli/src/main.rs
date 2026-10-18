@@ -105,6 +105,8 @@ OPTIONS
   --save                        save the project back to --project when done
   --save-as <p.fcproj>          save the project to this path when done
   --bridge <127.0.0.1:PORT>     send commands to the running app (`filmcraft --control PORT`)
+  --launch-app                  `mcp --bridge`: when nothing listens there, start the FilmCraft app
+                                beside this CLI with `--control PORT` and wait for it
   --data-dir <dir>              FilmCraft data directory for user export presets (headless;
                                 default: the app's data directory)
   --keep-going                  `run`: report failing lines and continue
@@ -479,11 +481,23 @@ async fn cli() {
             diag(format_args!("rendered {}x{} in {:.1} ms → {out}", img.w, img.h, dt.as_secs_f64() * 1000.0));
         }
         "mcp" => {
-            if let Some(opt) = a.unknown_opt(&["--bridge", "--project", "--demo", "--data-dir"]) {
+            if let Some(opt) = a.unknown_opt(&["--bridge", "--project", "--demo", "--data-dir", "--launch-app"]) {
                 usage(format!("unknown mcp option `{opt}`"));
             }
+            if a.flag("--launch-app") && a.opt("--bridge").is_none() {
+                usage("--launch-app starts the app for --bridge: give --bridge 127.0.0.1:PORT");
+            }
             let server = match a.opt("--bridge") {
-                Some(addr) => filmcraft_automation::FilmcraftMcp::bridge(addr).unwrap_or_else(|e| usage(e)),
+                Some(addr) => {
+                    let mut client = BridgeClient::new(addr).unwrap_or_else(|e| usage(e));
+                    if a.flag("--launch-app") {
+                        // the desktop app installed beside this CLI
+                        let exe = std::env::current_exe().unwrap_or_else(|e| fail(format!("mcp: where is this CLI? {e}")));
+                        let app = exe.with_file_name(if cfg!(windows) { "filmcraft.exe" } else { "filmcraft" });
+                        client = client.launching(app);
+                    }
+                    filmcraft_automation::FilmcraftMcp::bridge_with(client).unwrap_or_else(|e| usage(e))
+                }
                 None => match Backend::open(&a) {
                     Backend::Local(s) => filmcraft_automation::FilmcraftMcp::headless(*s),
                     Backend::Bridge(_) => usage("mcp: use --bridge ADDR to drive a running app"),

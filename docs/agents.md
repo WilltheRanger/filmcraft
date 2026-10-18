@@ -14,6 +14,17 @@ FilmCraft from an agent. Part 2 covers developing FilmCraft as an agent.
 | Headless | `filmcraft-cli mcp --demo` or `--project p.fcproj` (neither = empty project) | an in-process engine session, no window |
 | Bridge | `filmcraft-cli mcp --bridge 127.0.0.1:9876` | the running desktop app started with `filmcraft --control 9876` |
 
+Bridge mode also takes `--launch-app`: when nothing listens at the address, it starts the
+FilmCraft app installed beside the CLI with `--control PORT` and waits for it (once per start; on
+Windows outside the agent host's job object, so the app outlives the agent session). An agent then
+never needs someone to open the app first.
+
+Every control on screen has an id for `ui_click`: panels register their own
+(`effectControls.motion.position.x`, `properties.motion.scale.value`, `history.step.3`), and while
+the control channel is on, a standard egui widget a panel left unnamed gets
+`auto.<scope>.<role>[.<label>]` from the accessibility tree (scope: the dialog title, the panel or
+`popup`; a value field is named after the label beside it). `ui_coverage` lists anything left.
+
 Headless mode also takes `--data-dir DIR` (user presets). Any other option is rejected (exit 2):
 there are no folder-confinement flags such as `--automation-read-root`, so the server can read
 and write wherever the user can.
@@ -74,6 +85,7 @@ claude mcp add filmcraft -- filmcraft-cli mcp
 | `ui_key` | bridge | key or shortcut: `Space`, `Cmd+K`, `Shift+Delete` |
 | `ui_type` | bridge | type text into the focused field |
 | `ui_screenshot` | bridge | PNG of the window or one `panel` |
+| `ui_coverage` | bridge | on-screen controls that have no id (reachable only by x,y); empty `uncovered` means every control is clickable by id |
 | `ui_control` | bridge | call any control-channel method directly (`ui.set`, `ui.scroll`, `ui.timeline.locate`, …) |
 
 Typical loop: `project_inspect` / `sequence_inspect` → get ids → `command_run` → `render_frame` or
