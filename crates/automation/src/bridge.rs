@@ -176,10 +176,10 @@ impl BridgeClient {
 
     /// Start `app --control <port>`, unless the one started before is still starting.
     fn start_app(&self, app: &std::path::Path) -> Result<(), AutomationError> {
-        // the app's control server listens on 127.0.0.1 only: an IPv6 bridge address could never
-        // reach the app started here
+        // the app's control server listens on 127.0.0.1 only: an IPv6 address could never reach the
+        // app started here, nor could `localhost` where it resolves to ::1 alone
         let host = self.addr.rsplit_once(':').map_or("", |(h, _)| h);
-        if !matches!(host, "127.0.0.1" | "localhost") {
+        if host != "127.0.0.1" {
             return Err(AutomationError::BadRequest(format!(
                 "--launch-app starts the app on 127.0.0.1, which `{}` does not reach: use --bridge 127.0.0.1:PORT",
                 self.addr
@@ -399,10 +399,14 @@ mod tests {
     /// anything is started.
     #[tokio::test]
     async fn launching_needs_an_ipv4_loopback_address() {
-        let b = BridgeClient::new("[::1]:9").unwrap().launching(std::env::current_exe().unwrap());
-        let e = b.execute("sequence.inspect", json!({})).await.unwrap_err().to_string();
-        assert!(e.contains("127.0.0.1"), "{e}");
-        assert!(b.started.lock().unwrap().is_none(), "nothing was started");
+        // a free port, so `localhost` is not answered by something else before the check
+        let port = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().port();
+        for addr in ["[::1]:9".to_string(), format!("localhost:{port}")] {
+            let b = BridgeClient::new(addr.clone()).unwrap().launching(std::env::current_exe().unwrap());
+            let e = b.execute("sequence.inspect", json!({})).await.unwrap_err().to_string();
+            assert!(e.contains("127.0.0.1"), "{addr}: {e}");
+            assert!(b.started.lock().unwrap().is_none(), "{addr}: nothing was started");
+        }
     }
 
     /// Everything else is forwarded unchanged.
