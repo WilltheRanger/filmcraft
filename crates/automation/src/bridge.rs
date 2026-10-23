@@ -23,6 +23,8 @@ type Conn = (BufReader<tokio::net::tcp::OwnedReadHalf>, tokio::net::tcp::OwnedWr
 
 pub struct BridgeClient {
     addr: String,
+    /// Inherited from the same owner-controlled environment as the desktop app.
+    token: Option<String>,
     /// Connections with no request in flight. A request takes one (or opens one) for its whole
     /// round trip and puts it back only once the reply is read, so a slow or abandoned request
     /// never holds up the others or leaves its late reply for the next one to read (#1538).
@@ -35,14 +37,22 @@ pub struct BridgeClient {
 }
 
 impl BridgeClient {
-    /// `addr` such as `127.0.0.1:9876` (loopback only).
+    /// `addr` such as `127.0.0.1:9876` (loopback only). Reads `FILMCRAFT_CONTROL_TOKEN`
+    /// from the environment; the desktop app requires this credential on every request.
     pub fn new(addr: impl Into<String>) -> Result<Self, AutomationError> {
         let addr = addr.into();
         let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&addr);
         if !matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1") {
             return Err(AutomationError::BadRequest(format!("bridge address must be loopback, got `{addr}`")));
         }
-        Ok(Self { addr, idle: Mutex::new(Vec::new()), next_id: AtomicU64::new(1), launch: None, started: std::sync::Mutex::new(None) })
+        Ok(Self {
+            addr,
+            token: std::env::var("FILMCRAFT_CONTROL_TOKEN").ok(),
+            idle: Mutex::new(Vec::new()),
+            next_id: AtomicU64::new(1),
+            launch: None,
+            started: std::sync::Mutex::new(None),
+        })
     }
 
     /// Start `app --control <port>` whenever nothing listens at the bridge address (the app is not
@@ -100,7 +110,7 @@ impl BridgeClient {
                 None => self.connect().await?,
             };
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let line = format!("{}\n", json!({"id": id, "method": method, "params": params}));
+            let line = format!("{}\n", json!({"id": id, "token": self.token, "method": method, "params": params}));
             let res: Result<Value, AutomationError> = async {
                 conn.1.write_all(line.as_bytes()).await.map_err(|e| AutomationError::Bridge(e.to_string()))?;
                 let mut buf = String::new();
@@ -185,6 +195,14 @@ impl BridgeClient {
                 self.addr
             )));
         }
+        // without the session token the app keeps its control server closed, and this would wait
+        // out the whole launch timeout for a port that never opens
+        let Some(token) = self.token.as_deref() else {
+            return Err(AutomationError::BadRequest(
+                "--launch-app needs FILMCRAFT_CONTROL_TOKEN in this environment: the app opens its control server only with it (see docs/control-protocol.md)"
+                    .into(),
+            ));
+        };
         let mut started = self.started.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(child) = started.as_mut()
             && matches!(child.try_wait(), Ok(None))
@@ -199,7 +217,12 @@ impl BridgeClient {
             .ok_or_else(|| AutomationError::BadRequest(format!("no port in `{}`", self.addr)))?;
         let spawn = |detach_from_job: bool| {
             let mut cmd = std::process::Command::new(app);
-            cmd.args(["--control", port]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+            // the same session token this client sends, so the app accepts its requests
+            cmd.args(["--control", port])
+                .env("FILMCRAFT_CONTROL_TOKEN", token)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt as _;
@@ -373,13 +396,31 @@ mod tests {
         assert!(b.started.lock().unwrap().is_none());
     }
 
+    /// A client with the session token the launched app needs.
+    fn with_token(mut b: BridgeClient) -> BridgeClient {
+        b.token = Some("0123456789abcdef".repeat(4));
+        b
+    }
+
     /// When nothing listens and the app cannot be started, the error says which app and why.
     #[tokio::test]
     async fn an_app_that_cannot_start_is_a_clear_error() {
         let free = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().to_string();
-        let b = BridgeClient::new(free).unwrap().launching("/no/such/filmcraft");
+        let b = with_token(BridgeClient::new(free).unwrap().launching("/no/such/filmcraft"));
         let e = b.execute("sequence.inspect", json!({})).await.unwrap_err().to_string();
         assert!(e.contains("cannot start") && e.contains("filmcraft"), "{e}");
+    }
+
+    /// Without the session token the app would keep its control server closed: launching is
+    /// refused at once, with what to set, instead of waiting out the launch timeout.
+    #[tokio::test]
+    async fn launching_needs_the_session_token() {
+        let free = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().to_string();
+        let mut b = BridgeClient::new(free).unwrap().launching(std::env::current_exe().unwrap());
+        b.token = None;
+        let e = b.execute("sequence.inspect", json!({})).await.unwrap_err().to_string();
+        assert!(e.contains("FILMCRAFT_CONTROL_TOKEN"), "{e}");
+        assert!(b.started.lock().unwrap().is_none(), "nothing was started");
     }
 
     /// An app that starts but quits before opening its control server is reported at once, with
@@ -388,7 +429,7 @@ mod tests {
     #[tokio::test]
     async fn an_app_that_exits_while_starting_is_reported_at_once() {
         let free = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().to_string();
-        let b = BridgeClient::new(free).unwrap().launching(std::env::current_exe().unwrap());
+        let b = with_token(BridgeClient::new(free).unwrap().launching(std::env::current_exe().unwrap()));
         let t = std::time::Instant::now();
         let e = b.execute("sequence.inspect", json!({})).await.unwrap_err().to_string();
         assert!(e.contains("exited"), "{e}");
@@ -419,5 +460,20 @@ mod tests {
         let seen = seen.lock().await;
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[1]["params"]["command"], "sequence.inspect");
+    }
+
+    #[tokio::test]
+    async fn credential_is_sent_on_every_request() {
+        let (addr, seen) = fake_app(Value::Null).await;
+        let mut b = BridgeClient::new(addr).unwrap();
+        // Inject directly to avoid mutating the process environment in parallel tests.
+        let token = "0123456789abcdef".repeat(4);
+        b.token = Some(token.clone());
+        b.call("ui.inspect", json!({})).await.unwrap();
+        b.execute("file.saveAs", json!({"path": "/owner/project.fcproj"})).await.unwrap();
+        let seen = seen.lock().await;
+        assert_eq!(seen.len(), 2);
+        assert!(seen.iter().all(|request| request["token"] == token));
+        assert_eq!(seen[1]["params"]["params"]["path"], "/owner/project.fcproj");
     }
 }
