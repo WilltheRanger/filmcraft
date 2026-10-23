@@ -16,10 +16,11 @@ FilmCraft from an agent. Part 2 covers developing FilmCraft as an agent.
 
 Bridge mode also takes `--launch-app`: when nothing listens at the address (which must be
 `127.0.0.1:PORT`), it starts the FilmCraft app installed beside the CLI with `--control PORT` and
-the bridge's own `FILMCRAFT_CONTROL_TOKEN`, and waits for it (once per start; on Windows outside the
-agent host's job object, so the app outlives the agent session). An agent then never needs someone
-to open the app first. Without the token it refuses at once, since the app would keep its control
-server closed.
+the bridge's own `FILMCRAFT_CONTROL_TOKEN`, and waits for it (once per start; on Windows it leaves the
+agent host's job object when the host allows that, so it can outlive the agent session). On macOS,
+where the CLI ships apart from the app, it starts `FilmCraft.app` from /Applications or
+~/Applications. An agent then never needs someone to open the app first. Without a valid token (64
+hex characters) it refuses at once, since the app would keep its control server closed.
 
 Every control on screen has an id for `ui_click`: panels register their own
 (`effectControls.motion.position.x`, `properties.motion.scale.value`, `history.step.3`), and while

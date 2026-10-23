@@ -139,6 +139,19 @@ fn usage(msg: impl std::fmt::Display) -> ! {
     std::process::exit(2)
 }
 
+/// The desktop app `mcp --launch-app` starts: the one installed beside this CLI (Windows and Linux
+/// packages). The macOS CLI ships apart from `FilmCraft.app`, so there the app bundle's executable
+/// in /Applications or ~/Applications is used when nothing sits beside the CLI.
+fn desktop_app(cli: &std::path::Path) -> std::path::PathBuf {
+    let beside = cli.with_file_name(if cfg!(windows) { "filmcraft.exe" } else { "filmcraft" });
+    if !cfg!(target_os = "macos") || beside.is_file() {
+        return beside;
+    }
+    let in_bundle = |apps: std::path::PathBuf| apps.join("FilmCraft.app/Contents/MacOS/FilmCraft");
+    let home = std::env::var_os("HOME").map(|h| in_bundle(std::path::PathBuf::from(h).join("Applications")));
+    std::iter::once(in_bundle("/Applications".into())).chain(home).find(|p| p.is_file()).unwrap_or(beside)
+}
+
 fn fail(msg: impl std::fmt::Display) -> ! {
     diag(format_args!("filmcraft-cli: {msg}"));
     std::process::exit(1)
@@ -505,10 +518,8 @@ async fn cli() {
                 Some(addr) => {
                     let mut client = BridgeClient::new(addr).unwrap_or_else(|e| usage(e));
                     if a.flag("--launch-app") {
-                        // the desktop app installed beside this CLI
                         let exe = std::env::current_exe().unwrap_or_else(|e| fail(format!("mcp: where is this CLI? {e}")));
-                        let app = exe.with_file_name(if cfg!(windows) { "filmcraft.exe" } else { "filmcraft" });
-                        client = client.launching(app);
+                        client = client.launching(desktop_app(&exe));
                     }
                     filmcraft_automation::FilmcraftMcp::bridge_with(client).unwrap_or_else(|e| usage(e))
                 }

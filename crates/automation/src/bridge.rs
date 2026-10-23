@@ -197,9 +197,10 @@ impl BridgeClient {
         }
         // without the session token the app keeps its control server closed, and this would wait
         // out the whole launch timeout for a port that never opens
-        let Some(token) = self.token.as_deref() else {
+        // (the same format the app's listener requires: 64 hex characters)
+        let Some(token) = self.token.as_deref().filter(|t| t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())) else {
             return Err(AutomationError::BadRequest(
-                "--launch-app needs FILMCRAFT_CONTROL_TOKEN in this environment: the app opens its control server only with it (see docs/control-protocol.md)"
+                "--launch-app needs FILMCRAFT_CONTROL_TOKEN set to 64 hex characters in this environment: the app opens its control server only with such a token (see docs/control-protocol.md)"
                     .into(),
             ));
         };
@@ -416,11 +417,14 @@ mod tests {
     #[tokio::test]
     async fn launching_needs_the_session_token() {
         let free = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().to_string();
-        let mut b = BridgeClient::new(free).unwrap().launching(std::env::current_exe().unwrap());
-        b.token = None;
-        let e = b.execute("sequence.inspect", json!({})).await.unwrap_err().to_string();
-        assert!(e.contains("FILMCRAFT_CONTROL_TOKEN"), "{e}");
-        assert!(b.started.lock().unwrap().is_none(), "nothing was started");
+        // missing, or not in the 64-hex-character form the app's listener accepts
+        for token in [None, Some(String::new()), Some("a".repeat(63)), Some("z".repeat(64))] {
+            let mut b = BridgeClient::new(free.clone()).unwrap().launching(std::env::current_exe().unwrap());
+            b.token = token.clone();
+            let e = b.execute("sequence.inspect", json!({})).await.unwrap_err().to_string();
+            assert!(e.contains("FILMCRAFT_CONTROL_TOKEN"), "{token:?}: {e}");
+            assert!(b.started.lock().unwrap().is_none(), "{token:?}: nothing was started");
+        }
     }
 
     /// An app that starts but quits before opening its control server is reported at once, with
