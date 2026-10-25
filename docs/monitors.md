@@ -19,6 +19,7 @@ focused monitor (Program by default). Code: `crates/ui-egui/src/panels/monitor_v
 | `view.showRulers`, `view.showGuides`, `view.lockGuides`, `view.clearGuides` | View | toggles take `{"enabled": bool}` |
 | `view.addGuide` | View ▸ Add Guide… | dialog, or `{"orientation": "vertical\|horizontal", "position": px}` |
 | `view.snapInProgramMonitor` | View ▸ Snap in Program Monitor | graphic moves snap to the frame edges / centre and the guides (6 pt) |
+| `view.transparencyGrid` | wrench menu ▸ Transparency Grid | a gray and white checkerboard (8 pt squares) behind the picture shows its transparent areas; off by default, each monitor keeps its own; takes `{"enabled": bool}`. The Program monitor renders on the CPU while the grid is on |
 | `view.safeMargins` | Guide Templates ▸ Safe Margins | action- and title-safe boxes |
 | `view.guideTemplates.save`, `.manage`, `.apply`, `.delete` | Guide Templates ▸ Save Guides as Template… / Manage Guides… | templates are stored in the user preferences (`guides.templates`) |
 
@@ -54,7 +55,7 @@ Commands: `source.playback.play`, `source.playback.stop`, `source.playback.toggl
 available through the UI command registry, CLI bridge and MCP. `playback.toggle`,
 `playback.forward`, `playback.reverse`, `playback.slowForward` and `playback.slowReverse` also
 accept `monitor: "source"|"program"` to override focus. `ui.inspect.sourcePlayback` reports playing,
-audioClock and playhead. Test: `cargo test --release -p filmcraft-ui-egui --test source_playback_ui`.
+audioClock and playhead. Test: `cargo test --release -p filmcraft-ui-egui --test it source_playback_ui::`.
 
 ## Drag a marked Source range to the timeline
 
@@ -75,7 +76,7 @@ Automation ids: `source.drag.video`, `source.drag.audio`, `source.drag.both`, `s
 and `source.waveform`. Placement dispatches `timeline.place` with `sourceIn`, `duration`, `video`
 and `audio`; the stream flags default to true for existing callers. Engine tests cover range
 bounds, stream choices, linked placement, invalid parameters and undo/redo. UI tests exercise
-actual drags: `cargo test --release -p filmcraft-ui-egui --test source_drag_ui`.
+actual drags: `cargo test --release -p filmcraft-ui-egui --test it source_drag_ui::`.
 
 Ctrl+Shift+X (Cmd+Shift+X on macOS) clears In/Out on the focused Source clip, including split
 points, and restores the implicit full span. It is undoable and leaves Program marks unchanged.
